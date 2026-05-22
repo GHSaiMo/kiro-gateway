@@ -131,6 +131,29 @@ class TestEnhanceKiroErrorMonthlyLimit:
         assert "(reason:" not in error_info.user_message
         assert "MONTHLY_REQUEST_COUNT" not in error_info.user_message
 
+    def test_monthly_limit_error_nested_payload_is_detected(self):
+        """
+        What it does: Verifies nested Anthropic-style error payload is normalized.
+        Purpose: Ensure monthly quota failover can trigger from the exact wire format
+        returned by Kiro Gateway / Anthropic-compatible error bodies.
+        """
+        print("Setup: Creating nested Anthropic-style monthly quota error JSON...")
+        error_json = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "Monthly request limit exceeded. Account has reached its monthly quota."
+            }
+        }
+
+        print("Action: Enhancing nested error...")
+        error_info = enhance_kiro_error(error_json)
+
+        print("Verification: Nested monthly quota error is recognized...")
+        assert error_info.reason == "MONTHLY_REQUEST_COUNT"
+        assert error_info.user_message == "Monthly request limit exceeded. Account has reached its monthly quota."
+        assert error_info.is_monthly_quota_exceeded is True
+
 
 class TestEnhanceKiroErrorUnknown:
     """Tests for unknown error handling."""

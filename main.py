@@ -40,6 +40,7 @@ Priority: CLI args > Environment variables > Default values
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 import os
@@ -61,6 +62,8 @@ from kiro.config import (
     REGION,
     KIRO_CREDS_FILE,
     KIRO_CLI_DB_FILE,
+    KIRO_ACCOUNT_POOL_ROOT,
+    KIRO_ACCOUNT_POOL_REFRESH_INTERVAL_SECONDS,
     PROXY_API_KEY,
     LOG_LEVEL,
     SERVER_HOST,
@@ -75,6 +78,8 @@ from kiro.config import (
     VPN_PROXY_URL,
     _warn_timeout_configuration,
 )
+from kiro.account_pool import COCKPIT_ACCOUNTS_DIR, CockpitKiroAccountPool
+from kiro.account_switcher import KiroAccountSwitcher
 from kiro.auth import KiroAuthManager
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
@@ -168,6 +173,88 @@ def setup_logging_intercept():
         logging_logger.propagate = False
 
 
+def _resolve_cockpit_pool_root() -> Path | None:
+    """
+    Resolves the Cockpit account pool root when pool mode is configured.
+
+    Returns:
+        Cockpit root path or ``None`` when pool mode is unavailable.
+    """
+    if KIRO_ACCOUNT_POOL_ROOT:
+        path = Path(KIRO_ACCOUNT_POOL_ROOT).expanduser()
+        if path.exists():
+            return path
+        logger.warning(f"KIRO_ACCOUNT_POOL_ROOT not found: {KIRO_ACCOUNT_POOL_ROOT}")
+
+    if KIRO_CREDS_FILE:
+        creds_path = Path(KIRO_CREDS_FILE).expanduser()
+        if creds_path.parent.name == "kiro_accounts":
+            root = creds_path.parent.parent
+            if root.exists():
+                return root
+
+    default_root = Path.home() / ".antigravity_cockpit"
+    if (default_root / COCKPIT_ACCOUNTS_DIR).exists():
+        return default_root
+
+    return None
+
+
+def _build_auth_manager_and_switcher() -> tuple[KiroAuthManager, CockpitKiroAccountPool | None, KiroAccountSwitcher | None]:
+    """
+    Builds the active auth manager, optionally enabling Cockpit pool failover.
+
+    Returns:
+        Tuple of (auth_manager, pool, switcher).
+    """
+    pool_root = _resolve_cockpit_pool_root()
+    if pool_root is not None:
+        pool = CockpitKiroAccountPool(pool_root)
+        pool.refresh()
+        if pool.accounts:
+            try:
+                switcher = KiroAccountSwitcher(pool=pool, current_account_id=pool.current_account_id)
+                logger.info(
+                    "Cockpit account pool enabled: "
+                    f"root={pool_root}, accounts={len(pool.accounts)}, current={switcher.current_account_id}"
+                )
+                return switcher.current_auth_manager, pool, switcher
+            except ValueError as exc:
+                logger.warning(f"Failed to initialize Cockpit account switcher: {exc}")
+        else:
+            logger.warning(f"Cockpit account pool is empty: {pool_root}")
+
+    auth_manager = KiroAuthManager(
+        refresh_token=REFRESH_TOKEN,
+        profile_arn=PROFILE_ARN,
+        region=REGION,
+        creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
+        sqlite_db=KIRO_CLI_DB_FILE if KIRO_CLI_DB_FILE else None,
+    )
+    return auth_manager, None, None
+
+
+async def _refresh_cockpit_pool_loop(app: FastAPI) -> None:
+    """
+    Periodically refreshes the Cockpit account pool snapshot.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    interval = max(KIRO_ACCOUNT_POOL_REFRESH_INTERVAL_SECONDS, 5)
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            switcher = getattr(app.state, "account_switcher", None)
+            if switcher is None:
+                continue
+            await switcher.refresh_pool()
+            logger.debug("Cockpit account pool snapshot refreshed from disk")
+    except asyncio.CancelledError:
+        logger.info("Cockpit account pool refresh loop cancelled")
+        raise
+
+
 # Configure uvicorn/fastapi log interception
 setup_logging_intercept()
 
@@ -220,6 +307,8 @@ def validate_configuration() -> None:
     has_refresh_token = bool(REFRESH_TOKEN)
     has_creds_file = bool(KIRO_CREDS_FILE)
     has_cli_db = bool(KIRO_CLI_DB_FILE)
+    pool_root = _resolve_cockpit_pool_root()
+    has_pool_root = pool_root is not None
     
     # Check if creds file actually exists
     if KIRO_CREDS_FILE:
@@ -236,7 +325,7 @@ def validate_configuration() -> None:
             logger.warning(f"KIRO_CLI_DB_FILE not found: {KIRO_CLI_DB_FILE}")
     
     # If no credentials found, show helpful error
-    if not has_refresh_token and not has_creds_file and not has_cli_db:
+    if not has_refresh_token and not has_creds_file and not has_cli_db and not has_pool_root:
         if not env_file.exists():
             # No .env file and no environment variables
             errors.append(
@@ -252,6 +341,7 @@ def validate_configuration() -> None:
                 "      - Option 1: KIRO_CREDS_FILE to your Kiro credentials JSON file\n"
                 "      - Option 2: REFRESH_TOKEN from Kiro IDE traffic\n"
                 "      - Option 3: KIRO_CLI_DB_FILE to kiro-cli SQLite database\n"
+                "      - Option 4: KIRO_ACCOUNT_POOL_ROOT for Cockpit-managed Kiro accounts\n"
                 "\n"
                 "Or use environment variables (for Docker):\n"
                 "   docker run -e PROXY_API_KEY=\"...\" -e REFRESH_TOKEN=\"...\" ...\n"
@@ -276,6 +366,9 @@ def validate_configuration() -> None:
                 "\n"
                 "   Option 3: kiro-cli SQLite database (AWS SSO)\n"
                 "      KIRO_CLI_DB_FILE=\"~/.local/share/kiro-cli/data.sqlite3\"\n"
+                "\n"
+                "   Option 4: Cockpit Kiro account pool\n"
+                "      KIRO_ACCOUNT_POOL_ROOT=\"~/.antigravity_cockpit\"\n"
                 "\n"
                 "   See README.md for how to obtain credentials."
             )
@@ -335,15 +428,17 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Shared HTTP client created with connection pooling")
     
-    # Create AuthManager
-    # Priority: SQLite DB > JSON file > environment variables
-    app.state.auth_manager = KiroAuthManager(
-        refresh_token=REFRESH_TOKEN,
-        profile_arn=PROFILE_ARN,
-        region=REGION,
-        creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
-        sqlite_db=KIRO_CLI_DB_FILE if KIRO_CLI_DB_FILE else None,
-    )
+    # Create AuthManager, optionally backed by a Cockpit account pool.
+    # Priority: Cockpit pool > SQLite DB > JSON file > environment variables
+    auth_manager, account_pool, account_switcher = _build_auth_manager_and_switcher()
+    app.state.auth_manager = auth_manager
+    app.state.account_pool = account_pool
+    app.state.account_switcher = account_switcher
+
+    app.state.account_pool_refresh_task = None
+    if account_switcher is not None:
+        app.state.account_pool_refresh_task = asyncio.create_task(_refresh_cockpit_pool_loop(app))
+        logger.info("Cockpit account pool refresh loop started")
     
     # Create model cache
     app.state.model_cache = ModelInfoCache()
@@ -421,6 +516,14 @@ async def lifespan(app: FastAPI):
     # Graceful shutdown
     logger.info("Shutting down application...")
     try:
+        refresh_task = getattr(app.state, "account_pool_refresh_task", None)
+        if refresh_task is not None:
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Cockpit account pool refresh loop stopped")
         await app.state.http_client.aclose()
         logger.info("Shared HTTP client closed")
     except Exception as e:

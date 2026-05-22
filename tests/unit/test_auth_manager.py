@@ -122,6 +122,109 @@ class TestKiroAuthManagerCredentialsFile:
         print(f"Comparing refresh_token: Expected 'fallback_token', Got '{manager._refresh_token}'")
         assert manager._refresh_token == "fallback_token"
 
+    def test_load_cockpit_snake_case_credentials_file(self, tmp_path):
+        """
+        What it does: Verifies Cockpit snake_case account snapshots are loaded.
+        Purpose: Ensure account pool failover can bind KiroAuthManager to Cockpit files.
+        """
+        print("Setup: Writing Cockpit-style snake_case credentials file...")
+        creds_path = tmp_path / "kiro_account.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "access_token": "cockpit_access_token",
+                    "refresh_token": "cockpit_refresh_token",
+                    "expires_at": 4102444800,
+                    "profile_arn": "arn:aws:codewhisperer:us-east-1:123:profile/cockpit",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        print("Action: Loading credentials through KiroAuthManager...")
+        manager = KiroAuthManager(creds_file=str(creds_path))
+
+        print("Verification: Snake-case token fields are loaded...")
+        assert manager._access_token == "cockpit_access_token"
+        assert manager._refresh_token == "cockpit_refresh_token"
+        assert manager._profile_arn == "arn:aws:codewhisperer:us-east-1:123:profile/cockpit"
+        assert manager._expires_at is not None
+        assert manager._expires_at.year == 2100
+        assert manager.creds_file == str(creds_path)
+
+    def test_load_cockpit_nested_auth_payload(self, tmp_path):
+        """
+        What it does: Verifies nested Cockpit auth payloads are loaded.
+        Purpose: Ensure future Cockpit files with kiro_auth_token_raw still work.
+        """
+        print("Setup: Writing Cockpit-style nested credentials file...")
+        creds_path = tmp_path / "kiro_account_nested.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "email": "nested@example.com",
+                    "kiro_auth_token_raw": {
+                        "accessToken": "nested_access_token",
+                        "refreshToken": "nested_refresh_token",
+                        "expiresAt": "2100-01-01T00:00:00Z",
+                        "profileArn": "arn:aws:codewhisperer:us-east-1:123:profile/nested",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        print("Action: Loading credentials through KiroAuthManager...")
+        manager = KiroAuthManager(creds_file=str(creds_path))
+
+        print("Verification: Nested auth token fields are loaded...")
+        assert manager._access_token == "nested_access_token"
+        assert manager._refresh_token == "nested_refresh_token"
+        assert manager._profile_arn == "arn:aws:codewhisperer:us-east-1:123:profile/nested"
+        assert manager._expires_at is not None
+        assert manager._expires_at.year == 2100
+
+    def test_save_credentials_preserves_cockpit_compatible_fields(self, tmp_path):
+        """
+        What it does: Verifies refreshed tokens are saved in both Kiro and Cockpit shapes.
+        Purpose: Keep Gateway token refresh compatible with Cockpit account snapshots.
+        """
+        print("Setup: Writing Cockpit credentials file with existing nested payload...")
+        creds_path = tmp_path / "kiro_account_save.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "id": "kiro_save",
+                    "access_token": "old_access",
+                    "refresh_token": "old_refresh",
+                    "kiro_auth_token_raw": {
+                        "accessToken": "old_nested_access",
+                        "refreshToken": "old_nested_refresh",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        manager = KiroAuthManager(creds_file=str(creds_path))
+        manager._access_token = "new_access"
+        manager._refresh_token = "new_refresh"
+        manager._expires_at = datetime(2100, 1, 1, tzinfo=timezone.utc)
+        manager._profile_arn = "arn:aws:codewhisperer:us-east-1:123:profile/save"
+
+        print("Action: Saving refreshed credentials...")
+        manager._save_credentials_to_file()
+        saved_payload = json.loads(creds_path.read_text(encoding="utf-8"))
+
+        print("Verification: Both top-level and nested token fields are updated...")
+        assert saved_payload["accessToken"] == "new_access"
+        assert saved_payload["refreshToken"] == "new_refresh"
+        assert saved_payload["access_token"] == "new_access"
+        assert saved_payload["refresh_token"] == "new_refresh"
+        assert saved_payload["profileArn"] == "arn:aws:codewhisperer:us-east-1:123:profile/save"
+        assert saved_payload["profile_arn"] == "arn:aws:codewhisperer:us-east-1:123:profile/save"
+        assert saved_payload["kiro_auth_token_raw"]["accessToken"] == "new_access"
+        assert saved_payload["kiro_auth_token_raw"]["refreshToken"] == "new_refresh"
+
 
 class TestKiroAuthManagerTokenExpiration:
     """Tests for token expiration checking."""

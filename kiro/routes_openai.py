@@ -49,6 +49,7 @@ from kiro.model_resolver import ModelResolver
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
+from kiro.request_failover import send_kiro_request_with_monthly_quota_failover
 from kiro.utils import generate_conversation_id
 
 # Import debug_logger
@@ -171,7 +172,12 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
     
-    auth_manager: KiroAuthManager = request.app.state.auth_manager
+    account_switcher = getattr(request.app.state, "account_switcher", None)
+    auth_manager: KiroAuthManager = (
+        account_switcher.current_auth_manager
+        if account_switcher is not None
+        else request.app.state.auth_manager
+    )
     model_cache: ModelInfoCache = request.app.state.model_cache
     
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
@@ -261,25 +267,22 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     # For non-streaming: use shared client for connection pooling
     url = f"{auth_manager.api_host}/generateAssistantResponse"
     logger.debug(f"Kiro API URL: {url}")
+    http_client = None
     
-    if request_data.stream:
-        # Streaming mode: per-request client prevents orphaned connections
-        # when network interface changes (VPN disconnect/reconnect)
-        http_client = KiroHttpClient(auth_manager, shared_client=None)
-    else:
-        # Non-streaming mode: shared client for efficient connection reuse
-        shared_client = request.app.state.http_client
-        http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
     try:
         # Make request to Kiro API (for both streaming and non-streaming modes)
         # Important: we wait for Kiro response BEFORE returning StreamingResponse,
         # so that 200 OK means Kiro accepted the request and started responding
-        response = await http_client.request_with_retry(
-            "POST",
-            url,
-            kiro_payload,
-            stream=True
+        response, future_auth_manager, _switched, http_client = await send_kiro_request_with_monthly_quota_failover(
+            auth_manager=auth_manager,
+            account_switcher=account_switcher,
+            url=url,
+            payload=kiro_payload,
+            shared_client=None if request_data.stream else request.app.state.http_client,
+            client_factory=KiroHttpClient,
         )
+        request.app.state.auth_manager = future_auth_manager
+        response_auth_manager = http_client.auth_manager
         
         if response.status_code != 200:
             try:
@@ -340,7 +343,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         response,
                         request_data.model,
                         model_cache,
-                        auth_manager,
+                        response_auth_manager,
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer
                     ):
@@ -386,7 +389,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 response,
                 request_data.model,
                 model_cache,
-                auth_manager,
+                response_auth_manager,
                 request_messages=messages_for_tokenizer,
                 request_tools=tools_for_tokenizer
             )
@@ -403,7 +406,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             return JSONResponse(content=openai_response)
     
     except HTTPException as e:
-        await http_client.close()
+        if http_client is not None:
+            await http_client.close()
         # Log access log for HTTP error
         logger.error(f"HTTP {e.status_code} - POST /v1/chat/completions - {e.detail}")
         # Flush debug logs on HTTP error ("errors" mode)
@@ -411,7 +415,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             debug_logger.flush_on_error(e.status_code, str(e.detail))
         raise
     except Exception as e:
-        await http_client.close()
+        if http_client is not None:
+            await http_client.close()
         logger.error(f"Internal error: {e}", exc_info=True)
         # Log access log for internal error
         logger.error(f"HTTP 500 - POST /v1/chat/completions - {str(e)[:100]}")

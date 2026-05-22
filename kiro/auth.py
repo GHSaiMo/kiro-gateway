@@ -33,7 +33,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from loguru import logger
@@ -60,6 +60,79 @@ SQLITE_REGISTRATION_KEYS = [
     "kirocli:odic:device-registration",
     "codewhisperer:odic:device-registration",
 ]
+
+
+def _first_non_empty_string(*values: Any) -> Optional[str]:
+    """
+    Returns the first non-empty string from the provided values.
+
+    Args:
+        values: Candidate values.
+
+    Returns:
+        First non-empty string or ``None``.
+    """
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _parse_expires_at(value: Any) -> Optional[datetime]:
+    """
+    Parses an expiration value from Cockpit or Kiro credential files.
+
+    Args:
+        value: Raw expiration value, which may be an epoch integer, float, or ISO string.
+
+    Returns:
+        Parsed timezone-aware datetime or ``None``.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            if text.isdigit():
+                return datetime.fromtimestamp(float(text), tz=timezone.utc)
+            if text.endswith("Z"):
+                return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(text)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _merge_nested_auth_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Extracts auth fields from top-level or nested Cockpit payloads.
+
+    Args:
+        data: Raw JSON payload from the credentials file.
+
+    Returns:
+        Flattened dict with the auth fields we care about.
+    """
+    merged = dict(data)
+    nested_auth = data.get("kiro_auth_token_raw")
+    if isinstance(nested_auth, dict):
+        for key, value in nested_auth.items():
+            merged.setdefault(key, value)
+    return merged
 
 
 class AuthType(Enum):
@@ -139,7 +212,7 @@ class KiroAuthManager:
         self._refresh_token = refresh_token
         self._profile_arn = profile_arn
         self._region = region
-        self._creds_file = creds_file
+        self._creds_file = str(Path(creds_file).expanduser()) if creds_file else None
         self._sqlite_db = sqlite_db
         
         # AWS SSO OIDC specific fields
@@ -223,7 +296,7 @@ class KiroAuthManager:
             if not path.exists():
                 logger.warning(f"SQLite database not found: {db_path}")
                 return
-            
+
             conn = sqlite3.connect(str(path))
             cursor = conn.cursor()
             
@@ -333,14 +406,27 @@ class KiroAuthManager:
             
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                logger.warning(f"Credentials file does not contain an object: {file_path}")
+                return
+            data = _merge_nested_auth_fields(data)
             
             # Load common data from file
-            if 'refreshToken' in data:
-                self._refresh_token = data['refreshToken']
-            if 'accessToken' in data:
-                self._access_token = data['accessToken']
-            if 'profileArn' in data:
-                self._profile_arn = data['profileArn']
+            self._refresh_token = _first_non_empty_string(
+                data.get('refreshToken'),
+                data.get('refresh_token'),
+                self._refresh_token,
+            ) or self._refresh_token
+            self._access_token = _first_non_empty_string(
+                data.get('accessToken'),
+                data.get('access_token'),
+                self._access_token,
+            ) or self._access_token
+            self._profile_arn = _first_non_empty_string(
+                data.get('profileArn'),
+                data.get('profile_arn'),
+                self._profile_arn,
+            ) or self._profile_arn
             if 'region' in data:
                 self._region = data['region']
                 # Update URLs for new region
@@ -353,24 +439,28 @@ class KiroAuthManager:
             if 'clientIdHash' in data:
                 self._client_id_hash = data['clientIdHash']
                 self._load_enterprise_device_registration(self._client_id_hash)
+            if 'client_id_hash' in data and not self._client_id_hash:
+                self._client_id_hash = data['client_id_hash']
+                self._load_enterprise_device_registration(self._client_id_hash)
             
             # Load AWS SSO OIDC specific fields (if directly in credentials file)
-            if 'clientId' in data:
-                self._client_id = data['clientId']
-            if 'clientSecret' in data:
-                self._client_secret = data['clientSecret']
+            self._client_id = _first_non_empty_string(
+                data.get('clientId'),
+                data.get('client_id'),
+                self._client_id,
+            ) or self._client_id
+            self._client_secret = _first_non_empty_string(
+                data.get('clientSecret'),
+                data.get('client_secret'),
+                self._client_secret,
+            ) or self._client_secret
             
             # Parse expiresAt
-            if 'expiresAt' in data:
-                try:
-                    expires_str = data['expiresAt']
-                    # Support for different date formats
-                    if expires_str.endswith('Z'):
-                        self._expires_at = datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
-                    else:
-                        self._expires_at = datetime.fromisoformat(expires_str)
-                except Exception as e:
-                    logger.warning(f"Failed to parse expiresAt: {e}")
+            parsed_expires_at = _parse_expires_at(
+                data.get('expiresAt') if 'expiresAt' in data else data.get('expires_at')
+            )
+            if parsed_expires_at is not None:
+                self._expires_at = parsed_expires_at
             
             logger.info(f"Credentials loaded from {file_path}")
             
@@ -424,15 +514,43 @@ class KiroAuthManager:
             existing_data = {}
             if path.exists():
                 with open(path, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        existing_data = loaded
+
+            nested_auth = existing_data.get("kiro_auth_token_raw")
+            if not isinstance(nested_auth, dict):
+                nested_auth = {}
             
             # Update data
             existing_data['accessToken'] = self._access_token
             existing_data['refreshToken'] = self._refresh_token
+            existing_data['access_token'] = self._access_token
+            existing_data['refresh_token'] = self._refresh_token
             if self._expires_at:
                 existing_data['expiresAt'] = self._expires_at.isoformat()
+                existing_data['expires_at'] = int(self._expires_at.timestamp())
             if self._profile_arn:
                 existing_data['profileArn'] = self._profile_arn
+                existing_data['profile_arn'] = self._profile_arn
+            if self._client_id:
+                existing_data['clientId'] = self._client_id
+                existing_data['client_id'] = self._client_id
+            if self._client_secret:
+                existing_data['clientSecret'] = self._client_secret
+                existing_data['client_secret'] = self._client_secret
+
+            nested_auth['accessToken'] = self._access_token
+            nested_auth['refreshToken'] = self._refresh_token
+            if self._expires_at:
+                nested_auth['expiresAt'] = self._expires_at.isoformat()
+            if self._profile_arn:
+                nested_auth['profileArn'] = self._profile_arn
+            if self._client_id:
+                nested_auth['clientId'] = self._client_id
+            if self._client_secret:
+                nested_auth['clientSecret'] = self._client_secret
+            existing_data['kiro_auth_token_raw'] = nested_auth
             
             # Save
             with open(path, 'w', encoding='utf-8') as f:
@@ -840,6 +958,11 @@ class KiroAuthManager:
     def profile_arn(self) -> Optional[str]:
         """AWS CodeWhisperer profile ARN."""
         return self._profile_arn
+
+    @property
+    def creds_file(self) -> Optional[str]:
+        """Path to the backing credentials file, if any."""
+        return self._creds_file
     
     @property
     def region(self) -> str:

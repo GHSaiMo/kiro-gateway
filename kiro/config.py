@@ -146,6 +146,18 @@ KIRO_CREDS_FILE: str = str(Path(_raw_creds_file)) if _raw_creds_file else ""
 _raw_cli_db_file = _get_raw_env_value("KIRO_CLI_DB_FILE") or os.getenv("KIRO_CLI_DB_FILE", "")
 KIRO_CLI_DB_FILE: str = str(Path(_raw_cli_db_file)) if _raw_cli_db_file else ""
 
+# Optional Cockpit account pool root.
+# When set, the gateway can load Kiro accounts from a Cockpit-managed pool.
+_raw_account_pool_root = _get_raw_env_value("KIRO_ACCOUNT_POOL_ROOT") or os.getenv(
+    "KIRO_ACCOUNT_POOL_ROOT", ""
+)
+KIRO_ACCOUNT_POOL_ROOT: str = str(Path(_raw_account_pool_root)) if _raw_account_pool_root else ""
+
+# Interval for refreshing the Cockpit account pool snapshot in the background.
+KIRO_ACCOUNT_POOL_REFRESH_INTERVAL_SECONDS: int = int(
+    os.getenv("KIRO_ACCOUNT_POOL_REFRESH_INTERVAL_SECONDS", "60")
+)
+
 # ==================================================================================================
 # Kiro API URL Templates
 # ==================================================================================================
@@ -468,4 +480,3 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
-

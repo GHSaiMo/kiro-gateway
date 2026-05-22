@@ -37,9 +37,12 @@ Example:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Any
+from typing import Any, Dict, Mapping, Tuple
 
 from loguru import logger
+
+
+MONTHLY_QUOTA_MESSAGE = "Monthly request limit exceeded. Account has reached its monthly quota."
 
 
 @dataclass
@@ -58,6 +61,47 @@ class KiroErrorInfo:
     reason: str
     user_message: str
     original_message: str
+    is_monthly_quota_exceeded: bool = False
+
+
+def _extract_error_payload(error_json: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Extracts the most relevant error payload from a raw Kiro error body.
+
+    Args:
+        error_json: Parsed JSON from Kiro or Anthropic-style error response.
+
+    Returns:
+        A tuple of (payload, source) where payload contains the normalized
+        message/reason fields and source is the original nested payload used
+        for fallbacks.
+    """
+    if not isinstance(error_json, Mapping):
+        return {}, {}
+
+    nested_error = error_json.get("error")
+    if isinstance(nested_error, Mapping):
+        payload = dict(nested_error)
+        payload.setdefault("message", error_json.get("message"))
+        payload.setdefault("reason", error_json.get("reason"))
+        payload.setdefault("type", error_json.get("type"))
+        return payload, dict(nested_error)
+
+    return dict(error_json), dict(error_json)
+
+
+def _is_monthly_quota_message(message: str) -> bool:
+    """
+    Checks whether a message matches the hard-coded monthly quota error text.
+
+    Args:
+        message: Error message string.
+
+    Returns:
+        True when the message matches the known monthly quota exhaustion text.
+    """
+    normalized = message.strip()
+    return normalized == MONTHLY_QUOTA_MESSAGE
 
 
 def enhance_kiro_error(error_json: Dict[str, Any]) -> KiroErrorInfo:
@@ -90,24 +134,33 @@ def enhance_kiro_error(error_json: Dict[str, Any]) -> KiroErrorInfo:
         >>> print(error_info.user_message)
         "Something went wrong. (reason: UNKNOWN_REASON)"
     """
+    payload, source = _extract_error_payload(error_json)
+
     # Extract original message and reason from Kiro API response
     # Handle None values explicitly (preserve empty strings)
-    original_message = error_json.get("message")
+    original_message = payload.get("message")
     if original_message is None:
         original_message = "Unknown error"
-    
-    reason = error_json.get("reason")
+
+    reason = payload.get("reason")
     if reason is None:
-        reason = "UNKNOWN"
-    
+        if _is_monthly_quota_message(str(original_message)):
+            reason = "MONTHLY_REQUEST_COUNT"
+        else:
+            reason = "UNKNOWN"
+
+    is_monthly_quota_exceeded = reason == "MONTHLY_REQUEST_COUNT" or _is_monthly_quota_message(
+        str(original_message)
+    )
+
     # Map known reasons to user-friendly messages
     if reason == "CONTENT_LENGTH_EXCEEDS_THRESHOLD":
         # Context limit exceeded - conversation is too long
         user_message = "Model context limit reached. Conversation size exceeds model capacity."
     
-    elif reason == "MONTHLY_REQUEST_COUNT":
+    elif is_monthly_quota_exceeded:
         # Monthly request limit exceeded - account quota exhausted
-        user_message = "Monthly request limit exceeded. Account has reached its monthly quota."
+        user_message = MONTHLY_QUOTA_MESSAGE
     
     # Future error enhancements can be added here:
     # elif reason == "RATE_LIMIT_EXCEEDED":
@@ -118,13 +171,14 @@ def enhance_kiro_error(error_json: Dict[str, Any]) -> KiroErrorInfo:
     else:
         # Unknown error or no enhancement available
         # Keep original message and append reason if present
-        if "reason" in error_json and reason != "UNKNOWN":
+        if "reason" in source and reason != "UNKNOWN":
             user_message = f"{original_message} (reason: {reason})"
         else:
             user_message = original_message
-    
+
     return KiroErrorInfo(
         reason=reason,
         user_message=user_message,
-        original_message=original_message
+        original_message=original_message,
+        is_monthly_quota_exceeded=is_monthly_quota_exceeded,
     )
