@@ -24,6 +24,7 @@ debug*.json
 # Project-specific
 _notes/
 requests/
+auth.md
 
 # Testing
 .pytest_cache/
