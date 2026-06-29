@@ -906,6 +906,16 @@ class KiroAuthManager:
                 if self._access_token and not self.is_token_expiring_soon():
                     logger.debug("SQLite reload provided fresh token, no refresh needed")
                     return self._access_token
+
+            # File mode: reload credentials first, Cockpit or Kiro may have updated them
+            if self._creds_file and not self._sqlite_db and self.is_token_expiring_soon():
+                logger.debug("File mode: reloading credentials before refresh attempt")
+                self._load_credentials_from_file(self._creds_file)
+                self._detect_auth_type()
+                # Check if reloaded token is now valid
+                if self._access_token and not self.is_token_expiring_soon():
+                    logger.debug("File reload provided fresh token, no refresh needed")
+                    return self._access_token
             
             # Try to refresh the token
             try:

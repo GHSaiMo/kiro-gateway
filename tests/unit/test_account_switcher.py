@@ -20,6 +20,7 @@ def _write_account_file(
     credits_total: float,
     credits_used: float,
     last_used: int,
+    expires_at: int = 9999999999,
 ) -> Path:
     accounts_dir.mkdir(parents=True, exist_ok=True)
     path = accounts_dir / f"{account_id}.json"
@@ -31,7 +32,7 @@ def _write_account_file(
                 "access_token": f"access-{account_id}",
                 "refresh_token": f"refresh-{account_id}",
                 "token_type": "Bearer",
-                "expires_at": 9999999999,
+                "expires_at": expires_at,
                 "credits_total": credits_total,
                 "credits_used": credits_used,
                 "bonus_total": 500,
@@ -70,6 +71,43 @@ async def test_switches_to_next_account_by_prompt_remaining(tmp_path):
     assert switcher.current_auth_manager is not None
     assert switcher.current_auth_manager.creds_file == str(second_path)
     assert switcher.current_auth_manager.creds_file != str(first_path)
+
+
+def test_initial_account_skips_expired_preferred_account(tmp_path):
+    """
+    What it does: Verifies startup skips a preferred account with an expired access token.
+    Purpose: Avoid binding Gateway to stale Cockpit snapshots that will fail refresh immediately.
+    """
+    print("Setup: Building Cockpit account pool with expired preferred account...")
+    root_dir = tmp_path / ".antigravity_cockpit"
+    accounts_dir = root_dir / "kiro_accounts"
+    expired_path = _write_account_file(
+        accounts_dir,
+        "kiro_expired",
+        credits_total=50,
+        credits_used=0,
+        last_used=1,
+        expires_at=1,
+    )
+    fresh_path = _write_account_file(
+        accounts_dir,
+        "kiro_fresh",
+        credits_total=40,
+        credits_used=0,
+        last_used=100,
+        expires_at=9999999999,
+    )
+
+    pool = CockpitKiroAccountPool(root_dir=root_dir)
+    pool.refresh()
+
+    print("Action: Creating switcher with expired account as preferred current...")
+    switcher = KiroAccountSwitcher(pool=pool, current_account_id="kiro_expired")
+
+    print("Verification: Fresh fallback is selected instead of expired preferred account...")
+    assert switcher.current_account_id == "kiro_fresh"
+    assert switcher.current_auth_manager.creds_file == str(fresh_path)
+    assert switcher.current_auth_manager.creds_file != str(expired_path)
 
 
 @pytest.mark.asyncio

@@ -83,6 +83,7 @@ class KiroAccountSwitcher:
         return (
             not account.is_banned
             and account.has_refresh_token
+            and account.has_fresh_access_token
             and remaining is not None
             and remaining > 0.0
         )
@@ -105,7 +106,12 @@ class KiroAccountSwitcher:
             if not candidate_id:
                 continue
             account = self._pool.get_account(candidate_id)
-            if account and not account.is_banned and account.has_refresh_token:
+            if (
+                account
+                and not account.is_banned
+                and account.has_refresh_token
+                and account.has_fresh_access_token
+            ):
                 return account
 
         return self._pool.pick_next_account()

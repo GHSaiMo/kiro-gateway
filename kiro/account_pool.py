@@ -19,6 +19,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from loguru import logger
 
+from kiro.config import TOKEN_REFRESH_THRESHOLD
+
 MONTHLY_POOL_FILE = "provider_current_accounts.json"
 COCKPIT_ACCOUNTS_DIR = "kiro_accounts"
 COCKPIT_ACCOUNTS_INDEX_FILE = "kiro_accounts.json"
@@ -313,6 +315,19 @@ class CockpitKiroAccount:
         return bool(self.refresh_token and self.refresh_token.strip())
 
     @property
+    def has_fresh_access_token(self) -> bool:
+        """
+        Returns whether the account snapshot has a currently usable access token.
+
+        Returns:
+            True when the access token expiry is known and outside the refresh window.
+        """
+        if self.expires_at is None:
+            return False
+        threshold = int(datetime.now(timezone.utc).timestamp()) + TOKEN_REFRESH_THRESHOLD
+        return self.expires_at > threshold
+
+    @property
     def is_banned(self) -> bool:
         """
         Returns whether the account is marked as banned.
@@ -491,6 +506,7 @@ class CockpitKiroAccountPool:
             if account.account_id not in excluded
             and not account.is_banned
             and account.has_refresh_token
+            and account.has_fresh_access_token
         ]
         ranked = [
             account

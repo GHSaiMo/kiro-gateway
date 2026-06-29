@@ -1932,6 +1932,56 @@ class TestKiroAuthManagerGracefulDegradation:
         print("Verification: Got fresh token from SQLite reload...")
         print(f"Comparing token: Expected 'fresh_access_token', Got '{token}'")
         assert token == "fresh_access_token"
+
+    @pytest.mark.asyncio
+    async def test_get_access_token_reloads_file_when_expiring_soon(self, tmp_path):
+        """
+        What it does: Verifies file-backed credentials are reloaded when expiring soon.
+        Purpose: Pick up fresh tokens written by Cockpit or Kiro before refreshing stale in-memory tokens.
+        """
+        print("Setup: Creating credentials file with an expiring token...")
+        creds_file = tmp_path / "kiro_account.json"
+        creds_file.write_text(
+            json.dumps(
+                {
+                    "access_token": "old_expiring_access_token",
+                    "refresh_token": "old_stale_refresh_token",
+                    "expires_at": (
+                        datetime.now(timezone.utc) + timedelta(minutes=5)
+                    ).isoformat(),
+                    "profile_arn": "arn:aws:codewhisperer:us-east-1:123:profile/file",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        print("Setup: Creating KiroAuthManager from the credentials file...")
+        manager = KiroAuthManager(creds_file=str(creds_file))
+        assert manager.is_token_expiring_soon() is True
+
+        print("Action: Simulating external refresh by rewriting the credentials file...")
+        creds_file.write_text(
+            json.dumps(
+                {
+                    "access_token": "fresh_file_access_token",
+                    "refresh_token": "fresh_file_refresh_token",
+                    "expires_at": (
+                        datetime.now(timezone.utc) + timedelta(hours=1)
+                    ).isoformat(),
+                    "profile_arn": "arn:aws:codewhisperer:us-east-1:123:profile/file",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        print("Action: Calling get_access_token()...")
+        with patch.object(manager, "_refresh_token_request", new_callable=AsyncMock) as mock_refresh:
+            token = await manager.get_access_token()
+
+        print("Verification: Got fresh token from file reload without network refresh...")
+        assert token == "fresh_file_access_token"
+        assert manager._refresh_token == "fresh_file_refresh_token"
+        mock_refresh.assert_not_called()
     
     @pytest.mark.asyncio
     async def test_get_access_token_graceful_fallback_when_refresh_fails_but_token_valid(

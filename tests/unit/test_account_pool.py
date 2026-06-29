@@ -20,6 +20,7 @@ def _write_account_file(
     bonus_used: float = 0.0,
     last_used: int = 1,
     created_at: int = 1,
+    expires_at: int = 9999999999,
 ) -> Path:
     accounts_dir.mkdir(parents=True, exist_ok=True)
     path = accounts_dir / f"{account_id}.json"
@@ -31,7 +32,7 @@ def _write_account_file(
                 "access_token": f"access-{account_id}",
                 "refresh_token": f"refresh-{account_id}",
                 "token_type": "Bearer",
-                "expires_at": 9999999999,
+                "expires_at": expires_at,
                 "credits_total": credits_total,
                 "credits_used": credits_used,
                 "bonus_total": bonus_total,
@@ -118,6 +119,41 @@ def test_pool_prefers_higher_prompt_remaining_then_older_last_used(tmp_path):
     print("Verification: Highest prompt remaining wins, then older last_used breaks ties...")
     assert picked is not None
     assert picked.account_id == "kiro_c"
+
+
+def test_pool_skips_expired_access_tokens_when_selecting_next_account(tmp_path):
+    """
+    What it does: Verifies expired account snapshots are not selected for failover.
+    Purpose: Avoid repeatedly choosing Cockpit accounts whose refresh token may already be invalid.
+    """
+    print("Setup: Writing one expired high-quota account and one fresh fallback...")
+    root_dir = tmp_path / ".antigravity_cockpit"
+    accounts_dir = root_dir / "kiro_accounts"
+    _write_account_file(
+        accounts_dir,
+        "kiro_expired",
+        credits_total=50,
+        credits_used=0,
+        last_used=1,
+        expires_at=1,
+    )
+    _write_account_file(
+        accounts_dir,
+        "kiro_fresh",
+        credits_total=40,
+        credits_used=0,
+        last_used=100,
+        expires_at=9999999999,
+    )
+
+    print("Action: Loading pool and selecting next candidate...")
+    pool = CockpitKiroAccountPool(root_dir=root_dir)
+    pool.refresh()
+    picked = pool.pick_next_account()
+
+    print("Verification: Fresh account is selected even with less remaining quota...")
+    assert picked is not None
+    assert picked.account_id == "kiro_fresh"
 
 
 def test_pool_reads_current_account_mapping(tmp_path):
