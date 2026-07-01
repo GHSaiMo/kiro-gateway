@@ -484,6 +484,8 @@ class CockpitKiroAccountPool:
     def pick_next_account(
         self,
         exclude_ids: Iterable[str] = (),
+        *,
+        require_fresh_access_token: bool = True,
     ) -> Optional[CockpitKiroAccount]:
         """
         Picks the next usable account from the pool.
@@ -495,6 +497,10 @@ class CockpitKiroAccountPool:
 
         Args:
             exclude_ids: Account ids that must not be selected.
+            require_fresh_access_token: Whether candidates must have an access
+                token outside the refresh window. Quota failover uses the
+                conservative default; auth failover can disable this so a
+                candidate with a refresh token gets one bounded refresh attempt.
 
         Returns:
             Best matching account or ``None`` when no usable account remains.
@@ -506,7 +512,7 @@ class CockpitKiroAccountPool:
             if account.account_id not in excluded
             and not account.is_banned
             and account.has_refresh_token
-            and account.has_fresh_access_token
+            and (account.has_fresh_access_token or not require_fresh_access_token)
         ]
         ranked = [
             account
