@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from loguru import logger
 
+from kiro.cockpit_storage import CockpitStorageError, read_account_document
 from kiro.config import TOKEN_REFRESH_THRESHOLD
 
 MONTHLY_POOL_FILE = "provider_current_accounts.json"
@@ -432,13 +433,9 @@ class CockpitKiroAccountPool:
         snapshots: List[CockpitKiroAccount] = []
         for path in sorted(self.accounts_dir.glob("*.json")):
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
+                payload = read_account_document(path).payload
+            except (OSError, json.JSONDecodeError, CockpitStorageError) as exc:
                 logger.warning(f"Skipping unreadable Cockpit account file: path={path}, error={exc}")
-                continue
-
-            if not isinstance(payload, Mapping):
-                logger.warning(f"Skipping non-object Cockpit account file: path={path}")
                 continue
 
             try:

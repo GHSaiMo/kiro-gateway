@@ -38,6 +38,11 @@ from typing import Any, Optional
 import httpx
 from loguru import logger
 
+from kiro.cockpit_storage import (
+    CockpitStorageError,
+    read_account_document,
+    write_account_document,
+)
 from kiro.config import (
     TOKEN_REFRESH_THRESHOLD,
     get_kiro_refresh_url,
@@ -404,11 +409,7 @@ class KiroAuthManager:
                 logger.warning(f"Credentials file not found: {file_path}")
                 return
             
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                logger.warning(f"Credentials file does not contain an object: {file_path}")
-                return
+            data = read_account_document(path).payload
             data = _merge_nested_auth_fields(data)
             
             # Load common data from file
@@ -464,7 +465,7 @@ class KiroAuthManager:
             
             logger.info(f"Credentials loaded from {file_path}")
             
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, CockpitStorageError, TypeError, ValueError) as e:
             logger.error(f"Error loading credentials from file: {e}")
     
     def _load_enterprise_device_registration(self, client_id_hash: str) -> None:
@@ -512,11 +513,11 @@ class KiroAuthManager:
             
             # Read existing data
             existing_data = {}
+            encrypted = False
             if path.exists():
-                with open(path, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
-                    if isinstance(loaded, dict):
-                        existing_data = loaded
+                document = read_account_document(path)
+                existing_data = document.payload
+                encrypted = document.encrypted
 
             nested_auth = existing_data.get("kiro_auth_token_raw")
             if not isinstance(nested_auth, dict):
@@ -552,13 +553,12 @@ class KiroAuthManager:
                 nested_auth['clientSecret'] = self._client_secret
             existing_data['kiro_auth_token_raw'] = nested_auth
             
-            # Save
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(existing_data, f, indent=2, ensure_ascii=False)
+            # Save atomically while preserving Cockpit's encrypted-at-rest format.
+            write_account_document(path, existing_data, encrypted=encrypted)
             
             logger.debug(f"Credentials saved to {self._creds_file}")
             
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, CockpitStorageError, TypeError, ValueError) as e:
             logger.error(f"Error saving credentials: {e}")
     
     def _save_credentials_to_sqlite(self) -> None:

@@ -236,6 +236,23 @@ Both key formats are supported for compatibility with different kiro-cli version
 
 </details>
 
+### Option 5：Cockpit Kiro 账号池
+
+如果使用 [Cockpit Tools](https://github.com/jlcodes99/cockpit-tools) 管理多个 Kiro 账号，可以直接启用账号池：
+
+```env
+KIRO_ACCOUNT_POOL_ROOT="~/.antigravity_cockpit"
+
+# 用于保护本代理服务的密码
+PROXY_API_KEY="my-super-secret-password-123"
+```
+
+当默认目录 `~/.antigravity_cockpit/kiro_accounts` 存在时，网关也会自动发现账号池。显式配置 `KIRO_ACCOUNT_POOL_ROOT` 可以避免自定义目录或多套环境下的路径歧义。
+
+网关同时支持旧版明文账号文件和 Cockpit Tools 1.3.5 起使用的 AES-256-GCM 加密文件。加密账号要求账号池根目录中保留 Cockpit 生成的 `secure-account-storage.key`；网关刷新 token 后会继续以加密格式原子写回，不会将凭据降级为明文。
+
+账号池启用成功时，启动日志会包含 `Cockpit account pool enabled`、加载账号数和当前账号。单个账号的认证刷新返回 400/401 或月度额度耗尽时，网关会切换到下一个可用账号。
+
 ### Getting Credentials
 
 **For Kiro IDE users:**

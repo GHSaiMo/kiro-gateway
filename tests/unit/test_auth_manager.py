@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from kiro.auth import KiroAuthManager, AuthType
+from kiro.cockpit_storage import read_account_document, write_account_document
 from kiro.config import TOKEN_REFRESH_THRESHOLD, get_aws_sso_oidc_url
 
 
@@ -224,6 +225,60 @@ class TestKiroAuthManagerCredentialsFile:
         assert saved_payload["profile_arn"] == "arn:aws:codewhisperer:us-east-1:123:profile/save"
         assert saved_payload["kiro_auth_token_raw"]["accessToken"] == "new_access"
         assert saved_payload["kiro_auth_token_raw"]["refreshToken"] == "new_refresh"
+
+    def test_load_and_save_encrypted_cockpit_credentials(self, tmp_path):
+        """
+        What it does: Loads and updates a Cockpit 1.3.5 encrypted account file.
+        Purpose: Ensure failover managers can refresh without leaking plaintext at rest.
+        """
+        print("Setup: Writing an encrypted Cockpit account snapshot...")
+        root_dir = tmp_path / ".antigravity_cockpit"
+        accounts_dir = root_dir / "kiro_accounts"
+        accounts_dir.mkdir(parents=True)
+        (root_dir / "secure-account-storage.key").write_text(
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            encoding="utf-8",
+        )
+        creds_path = accounts_dir / "kiro_secure.json"
+        write_account_document(
+            creds_path,
+            {
+                "id": "kiro_secure",
+                "access_token": "old_secure_access",
+                "refresh_token": "old_secure_refresh",
+                "expires_at": 4102444800,
+                "custom_field": {"preserve": True},
+                "kiro_auth_token_raw": {
+                    "accessToken": "old_secure_access",
+                    "refreshToken": "old_secure_refresh",
+                    "provider": "Github",
+                },
+            },
+            encrypted=True,
+        )
+
+        print("Action: Loading and saving rotated credentials...")
+        manager = KiroAuthManager(creds_file=str(creds_path))
+        assert manager._access_token == "old_secure_access"
+        assert manager._refresh_token == "old_secure_refresh"
+        manager._access_token = "new_secure_access"
+        manager._refresh_token = "new_secure_refresh"
+        manager._expires_at = datetime(2100, 1, 1, tzinfo=timezone.utc)
+        manager._save_credentials_to_file()
+
+        print("Verification: File remains encrypted and preserves unrelated fields...")
+        raw_text = creds_path.read_text(encoding="utf-8")
+        assert "new_secure_access" not in raw_text
+        envelope = json.loads(raw_text)
+        assert envelope["algorithm"] == "AES-256-GCM"
+        saved_document = read_account_document(creds_path)
+        assert saved_document.encrypted is True
+        assert saved_document.payload["access_token"] == "new_secure_access"
+        assert saved_document.payload["refresh_token"] == "new_secure_refresh"
+        assert saved_document.payload["custom_field"] == {"preserve": True}
+        assert saved_document.payload["kiro_auth_token_raw"]["accessToken"] == "new_secure_access"
+        assert saved_document.payload["kiro_auth_token_raw"]["refreshToken"] == "new_secure_refresh"
+        assert saved_document.payload["kiro_auth_token_raw"]["provider"] == "Github"
 
 
 class TestKiroAuthManagerTokenExpiration:

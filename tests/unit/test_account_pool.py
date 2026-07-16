@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from kiro.account_pool import CockpitKiroAccount, CockpitKiroAccountPool
+from kiro.cockpit_storage import write_account_document
 
 
 def _write_account_file(
@@ -182,3 +183,44 @@ def test_pool_reads_current_account_mapping(tmp_path):
 
     print("Verification: Current account mapping is exposed...")
     assert pool.current_account_id == "kiro_b"
+
+
+def test_pool_loads_cockpit_encrypted_account_snapshot(tmp_path):
+    """
+    What it does: Loads one AES-256-GCM Cockpit account into the pool.
+    Purpose: Ensure Cockpit 1.3.5 encrypted files participate in failover ranking.
+    """
+    print("Setup: Writing Cockpit secure-account key and encrypted snapshot...")
+    root_dir = tmp_path / ".antigravity_cockpit"
+    accounts_dir = root_dir / "kiro_accounts"
+    accounts_dir.mkdir(parents=True)
+    (root_dir / "secure-account-storage.key").write_text(
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        encoding="utf-8",
+    )
+    account_path = accounts_dir / "kiro_encrypted.json"
+    write_account_document(
+        account_path,
+        {
+            "id": "kiro_encrypted",
+            "email": "encrypted@example.com",
+            "access_token": "encrypted_access",
+            "refresh_token": "encrypted_refresh",
+            "expires_at": 9999999999,
+            "credits_total": 50,
+            "credits_used": 7,
+            "created_at": 1,
+            "last_used": 2,
+        },
+        encrypted=True,
+    )
+
+    print("Action: Loading encrypted account pool...")
+    pool = CockpitKiroAccountPool(root_dir=root_dir)
+    pool.refresh()
+
+    print("Verification: Encrypted account is loaded and ranked normally...")
+    assert len(pool.accounts) == 1
+    assert pool.accounts[0].account_id == "kiro_encrypted"
+    assert pool.accounts[0].prompt_remaining == 43
+    assert pool.pick_next_account() == pool.accounts[0]

@@ -5,6 +5,7 @@ httpx
 loguru
 python-dotenv
 tiktoken
+pycryptodome
 
 # Testing dependencies
 pytest
