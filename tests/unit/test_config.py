@@ -400,26 +400,26 @@ class TestServerHostConfig:
 class TestServerPortConfig:
     """Tests for SERVER_PORT configuration."""
     
-    def test_default_server_port_is_8000(self):
+    def test_default_server_port_is_8001(self):
         """
-        What it does: Verifies that SERVER_PORT defaults to 8000.
-        Purpose: Ensure that 8000 is used when no environment variable is set.
+        What it does: Verifies that SERVER_PORT defaults to 8001.
+        Purpose: Ensure that 8001 is used when no environment variable is set.
         """
         print("Setup: Removing SERVER_PORT from environment...")
-        
+
         with patch.dict(os.environ, {}, clear=False):
             if "SERVER_PORT" in os.environ:
                 del os.environ["SERVER_PORT"]
-            
+
             import importlib
             import kiro.config as config_module
             importlib.reload(config_module)
-            
+
             print(f"SERVER_PORT: {config_module.SERVER_PORT}")
             print(f"DEFAULT_SERVER_PORT: {config_module.DEFAULT_SERVER_PORT}")
-            print(f"Comparing: Expected 8000, Got {config_module.SERVER_PORT}")
-            assert config_module.SERVER_PORT == 8000
-            assert config_module.DEFAULT_SERVER_PORT == 8000
+            print(f"Comparing: Expected 8001, Got {config_module.SERVER_PORT}")
+            assert config_module.SERVER_PORT == 8001
+            assert config_module.DEFAULT_SERVER_PORT == 8001
     
     def test_server_port_from_environment(self):
         """

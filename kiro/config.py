@@ -88,7 +88,7 @@ SERVER_HOST: str = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)
 # Server port (default: 8000)
 # Can be overridden by CLI: python main.py --port 9000
 # Or by uvicorn directly: uvicorn main:app --port 9000
-DEFAULT_SERVER_PORT: int = 8000
+DEFAULT_SERVER_PORT: int = 8001
 SERVER_PORT: int = int(os.getenv("SERVER_PORT", str(DEFAULT_SERVER_PORT)))
 
 # ==================================================================================================
